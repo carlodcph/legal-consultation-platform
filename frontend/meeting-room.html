@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>WebRTC Full Demo</title>
+</head>
+<body>
+  <h2>Local Video</h2>
+  <video id="localVideo" autoplay playsinline muted width="300"></video>
+
+  <h2>Remote Video</h2>
+  <video id="remoteVideo" autoplay playsinline width="300"></video>
+
+  <br><br>
+
+  <button onclick="startCall()">Start Call</button>
+  <button onclick="shareScreen()">Share Screen</button>
+
+  <h3>Chat</h3>
+  <input id="messageInput" placeholder="Type message..." />
+  <button onclick="sendMessage()">Send</button>
+
+  <ul id="messages"></ul>
+
+  <script>
+    const ws = new WebSocket("ws://sixty-pigs-grow.loca.lt:8080");
+
+    let peerConnection;
+    let localStream;
+    let dataChannel;
+
+    const config = {
+      iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+    };
+
+    ws.onopen = async () => {
+      console.log("Connected to signaling server");
+      await init();
+    };
+
+    async function init() {
+      peerConnection = new RTCPeerConnection(config);
+
+      // CAMERA
+      localStream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true
+      });
+
+      document.getElementById("localVideo").srcObject = localStream;
+
+      localStream.getTracks().forEach(track => {
+        peerConnection.addTrack(track, localStream);
+      });
+
+      // RECEIVE VIDEO
+      peerConnection.ontrack = (event) => {
+        document.getElementById("remoteVideo").srcObject = event.streams[0];
+      };
+
+      // ICE
+      peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          console.log("Sending ICE:", event.candidate);
+          ws.send(JSON.stringify({
+            type: "ice",
+            candidate: event.candidate
+          }));
+        }
+      };
+
+      // RECEIVE CHAT
+      peerConnection.ondatachannel = (event) => {
+        dataChannel = event.channel;
+        setupChat();
+      };
+
+      peerConnection.onconnectionstatechange = () => {
+        console.log("Connection state:", peerConnection.connectionState);
+      };      
+    }
+
+    function setupChat() {
+      dataChannel.onopen = () => console.log("Chat ready");
+
+      dataChannel.onmessage = (event) => {
+        const li = document.createElement("li");
+        li.textContent = "Peer: " + event.data;
+        document.getElementById("messages").appendChild(li);
+      };
+    }
+
+    async function startCall() {
+      console.log("Starting call...");
+
+      // create chat channel
+      dataChannel = peerConnection.createDataChannel("chat");
+      setupChat();
+
+      const offer = await peerConnection.createOffer();
+      await peerConnection.setLocalDescription(offer);
+
+      ws.send(JSON.stringify({
+        type: "offer",
+        offer
+      }));
+    }
+
+    // SCREEN SHARE
+    async function shareScreen() {
+      const screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true
+      });
+
+      const screenTrack = screenStream.getTracks()[0];
+
+      const sender = peerConnection.getSenders().find(s => s.track.kind === "video");
+
+      sender.replaceTrack(screenTrack);
+
+      // show locally
+      document.getElementById("localVideo").srcObject = screenStream;
+
+      screenTrack.onended = () => {
+        sender.replaceTrack(localStream.getTracks()[0]);
+        document.getElementById("localVideo").srcObject = localStream;
+      };
+    }
+
+    // SIGNALING
+    ws.onmessage = async (message) => {
+      const data = JSON.parse(message.data);
+      console.log("Signal:", data.type);
+
+      if (data.type === "offer") {
+        await peerConnection.setRemoteDescription(data.offer);
+
+        const answer = await peerConnection.createAnswer();
+        await peerConnection.setLocalDescription(answer);
+
+        ws.send(JSON.stringify({
+          type: "answer",
+          answer
+        }));
+      }
+
+      if (data.type === "answer") {
+        await peerConnection.setRemoteDescription(data.answer);
+      }
+
+      if (data.type === "ice") {
+        console.log("Received ICE:", data.candidate);
+
+        if (data.candidate) {
+          await peerConnection.addIceCandidate(data.candidate);
+        }
+      }
+    };
+
+    // CHAT SEND
+    function sendMessage() {
+      const input = document.getElementById("messageInput");
+
+      if (!dataChannel || dataChannel.readyState !== "open") {
+        alert("Chat not ready");
+        return;
+      }
+
+      dataChannel.send(input.value);
+
+      const li = document.createElement("li");
+      li.textContent = "You: " + input.value;
+      document.getElementById("messages").appendChild(li);
+
+      input.value = "";
+    }
+  </script>
+</body>
+</html>
